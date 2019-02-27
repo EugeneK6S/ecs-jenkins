@@ -1,0 +1,272 @@
+Description: >
+  Jenkins ECS service
+
+Parameters:
+  VPC:
+    Description: The VPC that the ECS cluster is deployed to
+    Type: AWS::EC2::VPC::Id
+
+  Cluster:
+    Description: Please provide the ECS Cluster ID that this service should run on
+    Type: String
+  
+  ClusterARN: 
+    Type: String
+
+  DesiredCount:
+    Description: How many instances of this task should we run across our cluster?
+    Type: Number
+
+  TargetGroup:
+    Description: The Application Load Balancer listener to register with
+    Type: String
+
+  JNLPLoadBalancerUrl: 
+    Description: The JNLP internal Load Balancer URL
+    Type: String
+  
+  LoadBalancerUrl: 
+    Description: The Application Load Balancer URL
+    Type: String
+
+  EnvironmentName:
+    Type: String
+  
+  SiteName:
+    Type: String
+
+  SecurityGroup:
+    Type: String
+
+  PrivateSubnets: 
+    Type: String
+
+  EcsExecutionRole:
+    Type: String
+  
+  DeployMultiMaster:
+    Type: String
+    Default: "false"
+
+Conditions: 
+  MultiMaster: !Equals [ !Ref DeployMultiMaster, "true" ]
+
+Resources:
+
+  PasswordGeneratorRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: '/'
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: 'GeneratePassword'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'secretsmanager:GetRandomPassword'
+                Resource: '*'
+        - PolicyName: 'CreateSsmParams'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['ssm:PutParameter', 'ssm:DeleteParameter', 'kms:Encrypt']
+                Resource: "*"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+
+  PasswordGeneratorLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: 'Generates random password'
+      Handler: 'index.handler'
+      Role: !GetAtt PasswordGeneratorRole.Arn
+      Code:
+        ZipFile: |
+          const response = require('cfn-response');
+          const AWS = require('aws-sdk');
+          const ssm = new AWS.SSM();
+          const secretsManager = new AWS.SecretsManager();
+
+          exports.handler = (event, context) => {
+            if (event.RequestType == 'Delete') {
+              // Remove param when CloudFormation deletes the resource. The param name is the PhysicalResourceId
+              ssm.deleteParameter({ Name: event.PhysicalResourceId }).promise()
+                .then((data) => {
+                  return response.send(event, context, response.SUCCESS, data);
+              }).catch((err)=> {
+                  return response.send(event, context, response.FAILED, err);
+              });
+            }
+            else{ // Create or Update. Update (only happens when param name changes) will return a new physical id which will cause CF to delete the old one
+              let responseData;
+
+              secretsManager.getRandomPassword({ PasswordLength: 45, ExcludePunctuation: true }).promise()
+                .then((data) => {
+                  const password = data.RandomPassword.substring(0, 32); // We only really wanted 32 chars for the password
+                  const randomString = data.RandomPassword.substring(32); // Last 13 used to add randomness to the SSM param name to avoid deletion on replacement
+                  const paramName = event.ResourceProperties.ParameterNamePrefix + '-' + randomString;
+
+                  responseData = {
+                    ParameterName: paramName,
+                    EncodedParameterName: encodeURIComponent(encodeURIComponent(paramName)), // Double encoded to work with AWS console
+                    Password: password
+                  }
+
+                  const params = {
+                    Name: paramName,
+                    Type: 'SecureString',
+                    Value: password,
+                    Overwrite: true
+                  };
+                  return ssm.putParameter(params).promise();
+              }).then(() => {
+                  return response.send(event, context, response.SUCCESS, responseData, responseData.ParameterName); // Use param name as PhysicalResourceId
+              }).catch((err)=> {
+                  return response.send(event, context, response.FAILED, err);
+              });
+            }
+          };
+      Runtime: 'nodejs6.10'
+      Timeout: '30'
+
+  GeneratedPassword:
+    Type: 'AWS::CloudFormation::CustomResource'
+    Properties:
+      ServiceToken: !GetAtt PasswordGeneratorLambda.Arn
+      ParameterNamePrefix: '/JENKINS/master-password'
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      Role: !Ref ServiceRole
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      LoadBalancers:
+        - ContainerName: "jenkins-master"
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: jenkins-master
+      Volumes:
+        !If
+          - MultiMaster
+          -
+            Host:
+              SourcePath: "/opt/jenkins_home"
+            Name: "jenkins_home"
+          - !Ref "AWS::NoValue"
+      ContainerDefinitions:
+        - Name: jenkins-master
+          Essential: true
+          Image: 460520929798.dkr.ecr.us-west-1.amazonaws.com/jenkinsci:bloody
+          Memory: 2048
+          MountPoints:
+            !If
+              - MultiMaster
+              -
+                SourceVolume: "jenkins_home"
+                ContainerPath: "/var/jenkins_home"
+              - !Ref "AWS::NoValue"
+          Environment:
+            - Name: ENV_NAME
+              Value: !Ref EnvironmentName
+            - Name: JENKINS_ENV_ADMIN_USER
+              Value: admin
+            - Name: JENKINS_ENV_ADMIN_PASSWORD
+              Value: !GetAtt GeneratedPassword.Password
+            - Name: JENKINS_ENV_CONFIG_YML_URL
+              Value: 's3://devpanel-ecs-jenkins-templates/config.yml'
+            - Name: JENKINS_JNLP_LB
+              Value: !Ref JNLPLoadBalancerUrl
+            - Name: JENKINS_ENV_JENKINS_URL
+              Value: !Join ["", ["http://", !Ref SiteName]]
+            - Name: JENKINS_ENV_PLUGINS
+              Value: "clover,cloverphp,discard-old-build,disk-usage,extended-choice-parameter,github-scm-trait-commit-skip,jenkins-multijob-plugin,job-restrictions,jobConfigHistory,testng-plugin"
+            - Name: ECS_CLUSTER_ARN
+              Value: !Ref ClusterARN
+            - Name: ECS_CLUSTER_REGION
+              Value: !Ref AWS::Region
+            - Name: SLAVE_LOG_GROUP
+              Value: !Ref SlaveLogsGroup
+            - Name: SLAVE_SECURITY_GROUP
+              Value: !Ref SecurityGroup
+            - Name: SLAVE_SUBNETS
+              Value: !Ref PrivateSubnets
+            - Name: SLAVE_EXECUTION_ROLE
+              Value: !Ref EcsExecutionRole
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 8080
+            - ContainerPort: 50000
+              HostPort: 50000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MasterLogsGroup
+              awslogs-region: !Ref AWS::Region
+
+  MasterLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub ${EnvironmentName}-master
+      RetentionInDays: 365
+
+  SlaveLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub ${EnvironmentName}-slave
+      RetentionInDays: 365
+  
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ecs-service-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: !Sub ecs-service-${AWS::StackName}
+          PolicyDocument:
+            {
+              "Version": "2012-10-17",
+              "Statement":
+                [
+                  {
+                    "Effect": "Allow",
+                    "Action":
+                      [
+                        "ec2:AuthorizeSecurityGroupIngress",
+                        "ec2:Describe*",
+                        "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+                        "elasticloadbalancing:Describe*",
+                        "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+                        "elasticloadbalancing:DeregisterTargets",
+                        "elasticloadbalancing:DescribeTargetGroups",
+                        "elasticloadbalancing:DescribeTargetHealth",
+                        "elasticloadbalancing:RegisterTargets"
+                      ],
+                    "Resource": "*"
+                  }
+                ]
+            }
+
+Outputs:
+  Password:
+    Value: !GetAtt GeneratedPassword.Password

@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  S3Bucket:
+    Type: String
+  KeyName:
+    Type: String
+  HostedZoneId: 
+    Type: String
+  SiteName: 
+    Type: String
+
+Resources:
+  VPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3Bucket}/infrastructure/00_vpc.yaml
+      Parameters:
+        EnvironmentName: !Ref AWS::StackName
+        VpcCIDR: 10.180.0.0/16
+
+  SecurityGroups:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3Bucket}/infrastructure/01_security-groups.yaml
+      Parameters:
+        EnvironmentName: !Ref AWS::StackName
+        VPC: !GetAtt VPC.Outputs.VPC
+        VpcCIDR: 10.180.0.0/16
+
+  ALB:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3Bucket}/infrastructure/02_load-balancers.yaml
+      Parameters:
+        EnvironmentName: !Ref AWS::StackName
+        Path: /
+        VPC: !GetAtt VPC.Outputs.VPC
+        PublicSubnets: !GetAtt VPC.Outputs.PublicSubnets
+        SecurityGroup: !GetAtt SecurityGroups.Outputs.LoadBalancerSecurityGroup
+        LBSecurityGroup: !GetAtt SecurityGroups.Outputs.LoadBalancerSecurityGroup
+        PrivateSubnets: !GetAtt VPC.Outputs.PrivateSubnets
+        HostedZoneId: !Ref HostedZoneId
+        SiteName: !Ref SiteName
+
+  ECS:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3Bucket}/infrastructure/03_ecs-cluster.yaml
+      Parameters:
+        EnvironmentName: !Ref AWS::StackName
+        KeyName: !Ref KeyName
+        InstanceType: t2.large
+        ClusterSize: 2
+        VPC: !GetAtt VPC.Outputs.VPC
+        SecurityGroup: !GetAtt SecurityGroups.Outputs.ECSHostSecurityGroup
+        BastionSecurityGroup: !GetAtt SecurityGroups.Outputs.BastionSecurityGroup
+        PrivateSubnets: !GetAtt VPC.Outputs.PrivateSubnets
+        PublicSubnets: !GetAtt VPC.Outputs.PublicSubnets
+        JNLPLoadBalancer: !GetAtt ALB.Outputs.JNLPLoadBalancer
+        DataBucket: !Ref S3Bucket
+        VpcCIDR: 10.180.0.0/16
+
+  JenkinsMaster:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3Bucket}/services/jenkins-master/10_service.yaml
+      Parameters:
+        EnvironmentName: !Ref AWS::StackName
+        VPC: !GetAtt VPC.Outputs.VPC
+        Cluster: !GetAtt ECS.Outputs.Cluster
+        ClusterARN: !GetAtt ECS.Outputs.ClusterARN
+        DesiredCount: 1
+        TargetGroup: !GetAtt ALB.Outputs.TargetGroup
+        JNLPLoadBalancerUrl: !GetAtt ALB.Outputs.JNLPLoadBalancerUrl
+        LoadBalancerUrl: !GetAtt ALB.Outputs.LoadBalancerUrl
+        SiteName: !Ref SiteName
+        SecurityGroup: !GetAtt SecurityGroups.Outputs.ECSHostSecurityGroup
+        PrivateSubnets: !GetAtt VPC.Outputs.PrivateSubnets
+        EcsExecutionRole: !GetAtt ECS.Outputs.ECSRole
+        DeployMultiMaster: "false"
+
+  LifecycleHook:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3Bucket}/infrastructure/03_lifecyclehook.yaml
+      Parameters:
+        Cluster: !GetAtt ECS.Outputs.Cluster
+        ECSAutoScalingGroupName: !GetAtt ECS.Outputs.ECSAutoScalingGroupName
+
+Outputs:
+  JenkinsMasterUrl:
+    Description: The URL endpoint for the product service
+    Value: !Join ["/", [!GetAtt ALB.Outputs.LoadBalancerUrl, "/"]]
+  JenkinsMasterPassword:
+    Description: Admin password of Jenkins master
+    Value: !GetAtt JenkinsMaster.Outputs.Password

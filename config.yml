@@ -1,0 +1,139 @@
+security:
+  realm: jenkins_database
+  adminPassword: ${JENKINS_ENV_ADMIN_PASSWORD}
+  enableScriptSecurityForDSL: false
+  enableCLIOverRemoting: false
+  remove_master_envvars:
+  - '.*PASSWORD.*'
+
+job_dsl_scripts:
+  - |
+    // Creates a free style project
+    job('seedJob') {
+      steps {
+        shell('cp /tmp/dsl/*.groovy .')
+        dsl {
+            external('*.groovy')
+            removeAction('DELETE')
+        }
+      }
+    }
+    queue('seedJob')
+
+configuration_as_code: 
+  jenkins:
+    systemMessage: "Jenkins configured automatically by Jenkins Configuration as Code Plugin\n\n"
+    numExecutors: 2
+    
+clouds:
+  # Top level key -> name of the cloud
+  ecs-cloud:
+    # type is mandatory
+    type: ecs
+    # If your jenkins master is running on EC2 and is using IAM Role, then you can
+    # discard this credential, otherwise, you need to have an
+    # aws credential declared in the credentials secion
+    # credentialsId: 'my-aws-key'
+    # AWS region where your ECS Cluster reside
+    region: '${ECS_CLUSTER_REGION}'
+    # ARN of the ECS Cluster
+    cluster: '${ECS_CLUSTER_ARN}'
+    # Timeout (in second) for ECS task to be created, usefull if you use large docker
+    # slave image, because the host will take more time to pull the docker image
+    # If empty or <= 0, then 900 is the default.
+    slaveTimeoutInSeconds: 0
+    tunnel: '${JENKINS_JNLP_LB}:50000'
+    # List of templates
+    templates:
+      - name: jenkins-ecs-slave
+        launchType: EC2
+        # Only JNLP slaves are supported
+        image: 460520929798.dkr.ecr.us-west-1.amazonaws.com/jenkinsci-slave
+        # Labels are mandatory!
+        # Your pipeline jobs will need to use node(label){} in order to use
+        # this slave template
+        labels:
+          - jenkins-ecs-slave
+        # The directory within the container that is used as root filesystem
+        remoteFs: /home/jenkins
+        # JVM arguments to pass to the jnlp jar
+        jvmArgs: -Xmx4g
+        # ECS memory reservation
+        memoryReservation: 4096
+        # ECS cpu reservation
+        cpu: 2048
+        # Volume mappings
+        # If your slave need to build docker images, then map the host docker socket
+        # to the container docker socket. Also make sure the user within the container
+        # has privileges to that socket within the entrypoint
+        logDriver: awslogs
+        logDriverOptions:
+          awslogs-group: '${SLAVE_LOG_GROUP}'
+          awslogs-stream-prefix: '${SLAVE_LOG_GROUP}'
+          awslogs-region: '${ECS_CLUSTER_REGION}'
+        volumes:
+          - '/var/run/docker.sock:/var/run/docker.sock'
+        # Environment variables to pass to the slave container
+        # environment:
+        #   XXX: xxx
+        
+        # an iam role arn for the task. If omitted, the EC2 instance IAM Role that runs the task will be in use
+        # taskrole: '<TASKROLE_ARN>'
+  
+  fargate-cloud:
+    type: ecs
+    # If your jenkins master is running on EC2 and is using IAM Role, then you can
+    # discard this credential, otherwise, you need to have an
+    # aws credential declared in the credentials secion
+    # credentialsId: 'my-aws-key'
+    # AWS region where your ECS Cluster reside
+    region: '${ECS_CLUSTER_REGION}'
+    # ARN of the ECS Cluster
+    cluster: '${ECS_CLUSTER_ARN}'
+    # Timeout (in second) for ECS task to be created, usefull if you use large docker
+    # slave image, because the host will take more time to pull the docker image
+    # If empty or <= 0, then 900 is the default.
+    slaveTimeoutInSeconds: 0
+    tunnel: '${JENKINS_JNLP_LB}:50000'
+    # List of templates
+    templates:
+      - name: jenkins-fargate-slave
+        launchType: FARGATE
+        # Only JNLP slaves are supported
+        image: 460520929798.dkr.ecr.us-west-1.amazonaws.com/jenkinsci-slave
+        # Labels are mandatory!
+        # Your pipeline jobs will need to use node(label){} in order to use
+        # this slave template
+        labels:
+          - jenkins-fargate-slave
+        # The directory within the container that is used as root filesystem
+        remoteFs: /home/jenkins
+        # JVM arguments to pass to the jnlp jar
+        jvmArgs: -Xmx4g
+        # ECS memory reservation
+        memoryReservation: 4096
+        # ECS cpu reservation
+        cpu: 2048
+        # Volume mappings
+        # If your slave need to build docker images, then map the host docker socket
+        # to the container docker socket. Also make sure the user within the container
+        # has privileges to that socket within the entrypoint
+        logDriver: awslogs
+        logDriverOptions:
+          awslogs-group: '${SLAVE_LOG_GROUP}'
+          awslogs-stream-prefix: '${SLAVE_LOG_GROUP}'
+          awslogs-region: '${ECS_CLUSTER_REGION}'
+        # Environment variables to pass to the slave container
+        # environment:
+        #   XXX: xxx
+        
+        # an iam role arn for the task. If omitted, the EC2 instance IAM Role that runs the task will be in use
+        # taskrole: '<TASKROLE_ARN>'
+
+        #########################
+        ## FARGATE Only
+        #########################
+        securityGroups: '${SLAVE_SECURITY_GROUP}'        # comma separated security groups
+        assignPublicIp: false                 # default false
+        subnets: '${SLAVE_SUBNETS}'           # comma separated subnet ids
+        executionRole: '${SLAVE_EXECUTION_ROLE}'   # by default 'ecsTaskExecutionRole' - see https://github.com/jenkinsci/amazon-ecs-plugin/pull/62

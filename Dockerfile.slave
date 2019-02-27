@@ -1,0 +1,38 @@
+FROM jenkins/jnlp-slave:latest-jdk11
+
+USER root
+
+RUN apt-get -y update \ 
+	&& apt-get -y install vim software-properties-common \
+		wget zip unzip jq curl gnupg2 git \ 
+		sed apt-transport-https ca-certificates mariadb-client
+
+RUN wget https://s3.amazonaws.com/aws-cli/awscli-bundle.zip \
+	&& unzip awscli-bundle.zip \
+	&& ./awscli-bundle/install -i /usr/local/aws -b /usr/bin/aws \
+	&& rm -rf awscli-bundle*
+
+RUN wget -qO- https://s3.amazonaws.com/amazon-ecs-cli/ecs-cli-linux-amd64-latest > /usr/bin/ecs-cli \
+	&& chmod +x /usr/bin/ecs-cli
+
+# RUN wget https://get.docker.com/ -O - | sh
+
+RUN curl -SL https://download.docker.com/linux/static/stable/x86_64/docker-18.09.1.tgz | tar -xzv docker/docker && \
+	mv docker/docker /usr/bin && \
+	chmod +x /usr/bin/docker && \
+	rm -rf docker/
+
+RUN set -eux; \
+	apt-get update; \
+	apt-get install -y gosu; \
+	rm -rf /var/lib/apt/lists/*; \
+# verify that the binary works
+	gosu nobody true
+
+
+###
+# GoSu will be used to launch PID1 process as jenkins user
+###
+
+COPY --chown=jenkins:jenkins jenkins-slave /usr/local/bin/jenkins-slave
+ENTRYPOINT ["/usr/local/bin/jenkins-slave"]

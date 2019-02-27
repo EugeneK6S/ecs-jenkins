@@ -1,0 +1,157 @@
+Description: >
+  Internal ELB for JNLP connections + ALB for access to Jenkins Master
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: Choose which VPC the Application Load Balancer should be deployed to
+
+  Path:
+    Type: String
+    Default: /
+
+  PublicSubnets:
+    Description: Choose which subnets the Application Load Balancer should be deployed to
+    Type: List<AWS::EC2::Subnet::Id>
+
+  PrivateSubnets:
+    Description: Choose which subnets the Application Load Balancer should be deployed to
+    Type: List<AWS::EC2::Subnet::Id>
+
+  SecurityGroup:
+    Description: Select the Security Group to apply to the Application Load Balancer
+    Type: AWS::EC2::SecurityGroup::Id
+  
+  LBSecurityGroup:
+    Description: Pre-created SG for LB
+    Type: AWS::EC2::SecurityGroup::Id
+  
+  HostedZoneId: 
+    Description: Route53 Zone ID
+    Type: String
+  
+  SiteName:
+    Description: Site name
+    Type: String
+    Default: jenkins-ecs.devpanel.app
+
+##########################################
+# Loadbalancer setup for Jenkins HTTP port
+##########################################
+
+Resources:
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref EnvironmentName
+      Subnets: !Ref PublicSubnets
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '600'
+      SecurityGroups:
+        - !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref JenkinsTargetGroup
+
+  JenkinsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref LoadBalancerListener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - !Ref Path
+      Actions:
+        - TargetGroupArn: !Ref JenkinsTargetGroup
+          Type: forward
+
+  JenkinsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-jenkins
+      VpcId: !Ref VPC
+      Port: 8080
+      Protocol: HTTP
+      Matcher:
+        HttpCode: 200
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /login
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 86400
+        - Key: deregistration_delay.timeout_seconds
+          Value: '360'
+
+  JNLPLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: true
+      SecurityGroups:
+        - !Ref LBSecurityGroup
+      Subnets: !Ref PrivateSubnets
+      Scheme: internal
+      ConnectionSettings: 
+        IdleTimeout: 600
+      Listeners:
+      - LoadBalancerPort: '50000'
+        InstancePort: '50000'
+        Protocol: TCP
+      HealthCheck:
+        Target: TCP:50000
+        HealthyThreshold: '2'
+        UnhealthyThreshold: '5'
+        Interval: '30'
+        Timeout: '10'
+  
+  DNS:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Sub ${HostedZoneId}
+      RecordSets:
+        - Name: !Ref SiteName
+          Type: CNAME
+          TTL: 60
+          ResourceRecords:
+            - !Sub ${LoadBalancer.DNSName}
+
+Outputs:
+  LoadBalancer:
+    Description: A reference to the Application Load Balancer
+    Value: !Ref LoadBalancer
+  
+  JNLPLoadBalancer:
+    Description: A reference to the Classic Load Balancer (internal)
+    Value: !Ref JNLPLoadBalancer
+
+  LoadBalancerUrl:
+    Description: The URL of the ALB
+    Value: !GetAtt LoadBalancer.DNSName
+  
+  JNLPLoadBalancerUrl:
+    Description: The URL of the ALB
+    Value: !GetAtt JNLPLoadBalancer.DNSName
+
+  TargetGroup: 
+    Value: !Ref JenkinsTargetGroup

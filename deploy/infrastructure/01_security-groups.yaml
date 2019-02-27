@@ -1,0 +1,71 @@
+Description: >
+  Security Groups for ECS hosts, bastion and LBs 
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: Choose which VPC the security groups should be deployed to
+
+  VpcCIDR:
+    Type: String
+
+Resources:
+  # Only access ECS hosts from within VPC CIDR
+  ECSHostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Access to the ECS hosts and the tasks/containers that run on them
+      SecurityGroupIngress:
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: -1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ECS-Hosts
+
+  # Allow access from all sources to Load Balancer
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Access to the load balancer that sits in front of ECS
+      SecurityGroupIngress:
+        # Allow access from anywhere to our ECS services
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-LoadBalancers
+  
+  # Allow SSH access to bastion host
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Bastion node
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: TCP
+          ToPort: 22
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-bastion
+
+Outputs:
+  ECSHostSecurityGroup:
+    Description: A reference to the security group for ECS hosts
+    Value: !Ref ECSHostSecurityGroup
+
+  LoadBalancerSecurityGroup:
+    Description: A reference to the security group for load balancers
+    Value: !Ref LoadBalancerSecurityGroup
+  
+  BastionSecurityGroup:
+    Description: A reference to the security group for bastion host
+    Value: !Ref BastionSecurityGroup  
+
